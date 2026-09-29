@@ -307,6 +307,11 @@ func (m *Meta) providerFactories() (map[addrs.Provider]providers.Factory, error)
 		checkedProvider := false
 		var checkErr error
 
+		// Capture the allowed hashes to pass to the factory for re-verification
+		// before execution. This ensures the executable file is bound to the
+		// validated package contents.
+		allowedHashes := lock.PreferredHashes()
+
 		factories[provider] = func() (providers.Interface, error) {
 			checkLock.Lock()
 			if !checkedProvider {
@@ -319,7 +324,7 @@ func (m *Meta) providerFactories() (map[addrs.Provider]providers.Factory, error)
 				return nil, checkErr
 			}
 
-			return providerFactory(cached)()
+			return providerFactory(cached, allowedHashes)()
 		}
 	}
 	for provider, localDir := range devOverrideProviders {
@@ -347,10 +352,35 @@ func (m *Meta) internalProviders() map[string]providers.Factory {
 // providerFactory produces a provider factory that runs up the executable
 // file in the given cache package and uses go-plugin to implement
 // providers.Interface against it.
-func providerFactory(meta *providercache.CachedProvider) providers.Factory {
+//
+// The allowedHashes parameter contains the checksums from the lock file that
+// must be verified immediately before launching the provider executable. This
+// ensures that the executable file is bound to the validated package contents
+// and prevents time-of-check-time-of-use attacks where the package could be
+// modified between validation and execution.
+func providerFactory(meta *providercache.CachedProvider, allowedHashes []getproviders.Hash) providers.Factory {
 	schemaCache := providers.NewSchemaCache()
 
 	return func() (providers.Interface, error) {
+		// Re-verify the package hash immediately before execution to ensure
+		// the package contents have not been modified since the initial check.
+		// This binds the executable file selection to the validated package.
+		if len(allowedHashes) != 0 {
+			matched, err := meta.MatchesAnyHash(allowedHashes)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"failed to verify checksum of %s %s before execution: %w",
+					meta.Provider, meta.Version, err,
+				)
+			}
+			if !matched {
+				return nil, fmt.Errorf(
+					"the package for %s %s does not match any of the checksums recorded in the dependency lock file; the provider package may have been modified",
+					meta.Provider, meta.Version,
+				)
+			}
+		}
+
 		execFile, err := meta.ExecutableFile()
 		if err != nil {
 			return nil, err
@@ -414,12 +444,14 @@ func devOverrideProviderFactory(provider addrs.Provider, localDir getproviders.P
 	// here, so that's how we'll construct it. The providerFactory function
 	// doesn't actually care about the version, so we can leave it
 	// unspecified: overridden providers are not explicitly versioned.
+	// Dev overrides are not subject to checksum validation, so we pass nil
+	// for allowedHashes.
 	log.Printf("[DEBUG] Provider %s is overridden to load from %s", provider, localDir)
 	return providerFactory(&providercache.CachedProvider{
 		Provider:   provider,
 		Version:    getproviders.UnspecifiedVersion,
 		PackageDir: string(localDir),
-	})
+	}, nil)
 }
 
 // unmanagedProviderFactory produces a provider factory that uses the passed
