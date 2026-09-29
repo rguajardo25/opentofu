@@ -283,6 +283,9 @@ type Backend struct {
 	acl                  string
 	otsEndpoint          string
 	otsTable             string
+
+	// Profile configuration cache for this backend instance
+	profileConfig map[string]interface{}
 }
 
 func (b *Backend) configure(ctx context.Context) error {
@@ -301,7 +304,7 @@ func (b *Backend) configure(ctx context.Context) error {
 
 	var getBackendConfig = func(str string, key string) string {
 		if str == "" {
-			value, err := getConfigFromProfile(d, key)
+			value, err := b.getConfigFromProfile(d, key)
 			if err == nil && value != nil {
 				str = value.(string)
 			}
@@ -322,7 +325,7 @@ func (b *Backend) configure(ctx context.Context) error {
 	sessionName := getBackendConfig("", "ram_session_name")
 	var policy string
 	var sessionExpiration int
-	expiredSeconds, err := getConfigFromProfile(d, "expired_seconds")
+	expiredSeconds, err := b.getConfigFromProfile(d, "expired_seconds")
 	if err == nil && expiredSeconds != nil {
 		sessionExpiration = (int)(expiredSeconds.(float64))
 	}
@@ -552,11 +555,9 @@ func (a *Invoker) Run(f func() error) error {
 	return err
 }
 
-var providerConfig map[string]interface{}
+func (b *Backend) getConfigFromProfile(d *schema.ResourceData, ProfileKey string) (interface{}, error) {
 
-func getConfigFromProfile(d *schema.ResourceData, ProfileKey string) (interface{}, error) {
-
-	if providerConfig == nil {
+	if b.profileConfig == nil {
 		if v, ok := d.GetOk("profile"); !ok || v.(string) == "" {
 			return nil, nil
 		}
@@ -572,7 +573,7 @@ func getConfigFromProfile(d *schema.ResourceData, ProfileKey string) (interface{
 				profilePath = fmt.Sprintf("%s/.aliyun/config.json", os.Getenv("USERPROFILE"))
 			}
 		}
-		providerConfig = make(map[string]interface{})
+		b.profileConfig = make(map[string]interface{})
 		_, err = os.Stat(profilePath)
 		if !os.IsNotExist(err) {
 			data, err := os.ReadFile(profilePath)
@@ -586,14 +587,14 @@ func getConfigFromProfile(d *schema.ResourceData, ProfileKey string) (interface{
 			}
 			for _, v := range config["profiles"].([]interface{}) {
 				if current == v.(map[string]interface{})["name"] {
-					providerConfig = v.(map[string]interface{})
+					b.profileConfig = v.(map[string]interface{})
 				}
 			}
 		}
 	}
 
 	mode := ""
-	if v, ok := providerConfig["mode"]; ok {
+	if v, ok := b.profileConfig["mode"]; ok {
 		mode = v.(string)
 	} else {
 		return v, nil
@@ -621,7 +622,7 @@ func getConfigFromProfile(d *schema.ResourceData, ProfileKey string) (interface{
 		}
 	}
 
-	return providerConfig[ProfileKey], nil
+	return b.profileConfig[ProfileKey], nil
 }
 
 var securityCredURL = "http://100.100.100.200/latest/meta-data/ram/security-credentials/"
