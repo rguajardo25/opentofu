@@ -466,19 +466,19 @@ func (c *Communicator) UploadScript(path string, input io.Reader) error {
 	if c.connInfo.TargetPlatform != TargetPlatformWindows {
 		var stdout, stderr bytes.Buffer
 		cmd := &remote.Cmd{
-			Command: fmt.Sprintf("chmod 0777 %s", path),
+			Command: fmt.Sprintf("chmod 0700 %s", path),
 			Stdout:  &stdout,
 			Stderr:  &stderr,
 		}
 		if err := c.Start(cmd); err != nil {
 			return fmt.Errorf(
-				"Error chmodding script file to 0777 in remote "+
+				"Error chmodding script file to 0700 in remote "+
 					"machine: %s", err)
 		}
 
 		if err := cmd.Wait(); err != nil {
 			return fmt.Errorf(
-				"Error chmodding script file to 0777 in remote "+
+				"Error chmodding script file to 0700 in remote "+
 					"machine %v: %s %s", err, stdout.String(), stderr.String())
 		}
 	}
