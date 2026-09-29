@@ -8,6 +8,7 @@ package getproviders
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -40,16 +41,63 @@ func (p PackageLocalArchive) InstallProviderPackage(ctx context.Context, meta Pa
 	_, span := tracing.Tracer().Start(ctx, "Decompress (local archive)")
 	defer span.End()
 
+	filename := meta.Location.String()
+	span.SetAttributes(traceattrs.FilePath(filename))
+
+	// To prevent TOCTOU attacks where the archive file could be replaced between
+	// verification and extraction, we copy the archive to a temporary file with
+	// restricted permissions before performing any verification or extraction.
+	// This ensures all operations work on the same immutable content.
+	tmpFile, err := os.CreateTemp("", "tofu-provider-*.zip")
+	if err != nil {
+		err := fmt.Errorf("failed to create temporary file for provider package: %w", err)
+		tracing.SetSpanError(span, err)
+		return nil, err
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) // Clean up temporary file
+
+	// Restrict permissions on the temporary file to prevent tampering
+	if err := tmpFile.Chmod(0600); err != nil {
+		tmpFile.Close()
+		err := fmt.Errorf("failed to set permissions on temporary file: %w", err)
+		tracing.SetSpanError(span, err)
+		return nil, err
+	}
+
+	// Copy the archive to the temporary file
+	srcFile, err := os.Open(filename)
+	if err != nil {
+		tmpFile.Close()
+		err := fmt.Errorf("failed to open provider package at %s: %w", filename, err)
+		tracing.SetSpanError(span, err)
+		return nil, err
+	}
+
+	_, err = io.Copy(tmpFile, srcFile)
+	srcFile.Close()
+	tmpFile.Close()
+	if err != nil {
+		err := fmt.Errorf("failed to copy provider package to temporary file: %w", err)
+		tracing.SetSpanError(span, err)
+		return nil, err
+	}
+
+	// Create a temporary PackageLocalArchive pointing to our secure copy
+	tmpLocation := PackageLocalArchive(tmpPath)
+	tmpMeta := meta
+	tmpMeta.Location = tmpLocation
+
+	// Now perform authentication and hash verification on the temporary copy
 	var authResult *PackageAuthenticationResult
 	if meta.Authentication != nil {
-		var err error
-		if authResult, err = meta.Authentication.AuthenticatePackage(meta.Location); err != nil {
+		if authResult, err = meta.Authentication.AuthenticatePackage(tmpLocation); err != nil {
 			return nil, err
 		}
 	}
 
 	if len(allowedHashes) > 0 {
-		if matches, err := meta.MatchesAnyHash(allowedHashes); err != nil {
+		if matches, err := tmpMeta.MatchesAnyHash(allowedHashes); err != nil {
 			err := fmt.Errorf(
 				"failed to calculate checksum for %s %s package at %s: %w",
 				meta.Provider, meta.Version, meta.Location, err,
@@ -66,9 +114,6 @@ func (p PackageLocalArchive) InstallProviderPackage(ctx context.Context, meta Pa
 		}
 	}
 
-	filename := meta.Location.String()
-	span.SetAttributes(traceattrs.FilePath(filename))
-
 	// If there is already a package at the location we would've been installing
 	// to then that's okay if the content already matches what we would've
 	// installed, but we reject it otherwise so the operator can investigate.
@@ -83,7 +128,7 @@ func (p PackageLocalArchive) InstallProviderPackage(ctx context.Context, meta Pa
 		// empty directory is allowed here, not a symlink to an empty directory.
 		isEmptyDir := info.IsDir() && targetHash == emptyPackageHashV1
 		if !isEmptyDir {
-			fileHash, fileErr := PackageHashV1(meta.Location)
+			fileHash, fileErr := PackageHashV1(tmpLocation)
 			var err error
 			if fileErr != nil {
 				err = fmt.Errorf("failed to calculate checksum for temporary copy of provider package at %s: %s", meta.Location.String(), fileErr)
@@ -112,8 +157,9 @@ func (p PackageLocalArchive) InstallProviderPackage(ctx context.Context, meta Pa
 		}
 	}
 
+	// Extract from the verified temporary copy
 	//nolint:mnd // magic number predates us using this linter
-	err := unzip.Decompress(targetDir, filename, true, 0000)
+	err = unzip.Decompress(targetDir, tmpPath, true, 0000)
 	if err != nil {
 		tracing.SetSpanError(span, err)
 		return authResult, err
