@@ -715,7 +715,10 @@ func validateProviderConfigs(parentCall *ModuleCall, cfg *Config, noProviderConf
 		}
 
 		if cfg.Parent.Module.ProviderRequirements != nil {
-			req, defined := cfg.Parent.Module.ProviderRequirements.RequiredProviders[name]
+			// Look up the parent requirement using the parent's local name, not the child's.
+			// When there's a mapping like "bar = foo", we need to validate against the
+			// parent's "foo" provider, not a potentially different "bar" provider.
+			req, defined := cfg.Parent.Module.ProviderRequirements.RequiredProviders[passed.InParent.Name]
 			if defined {
 				parentAddr.Provider = req.Type
 			}
