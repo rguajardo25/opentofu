@@ -7,6 +7,7 @@ package cliconfig
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/hashicorp/hcl"
@@ -293,7 +294,31 @@ func decodeProviderInstallationFromConfig(hclFile *hclast.File) ([]*ProviderInst
 						))
 						continue
 					}
+					
+					// Clean the path first to normalize it
 					dirPath := filepath.Clean(rawPath)
+					
+					// Make the path absolute to prevent it from being resolved
+					// relative to a different directory if -chdir is used later.
+					// This is a security measure to ensure that dev_overrides
+					// paths specified in the user's CLI configuration are always
+					// resolved relative to the working directory at the time the
+					// configuration is loaded, not relative to any project directory
+					// that might be specified via -chdir.
+					if !filepath.IsAbs(dirPath) {
+						// Get the current working directory at config load time
+						cwd, err := os.Getwd()
+						if err != nil {
+							diags = diags.Append(tfdiags.Sourceless(
+								tfdiags.Error,
+								"Failed to determine current working directory",
+								fmt.Sprintf("Could not resolve relative dev_overrides path %q: %s", rawPath, err),
+							))
+							continue
+						}
+						dirPath = filepath.Join(cwd, dirPath)
+					}
+					
 					devOverrides[addr] = getproviders.PackageLocalDir(dirPath)
 				}
 
