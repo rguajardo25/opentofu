@@ -37,6 +37,24 @@ func (d *Dir) InstallPackage(ctx context.Context, meta getproviders.PackageMeta,
 
 	return install, errors.Join(installErr, unlock())
 }
+
+// InstallPackageRetainingLock is like InstallPackage but returns the unlock
+// function instead of calling it, allowing the caller to hold the lock for
+// additional operations. The caller MUST call the returned unlock function
+// when done.
+func (d *Dir) InstallPackageRetainingLock(ctx context.Context, meta getproviders.PackageMeta, allowedHashes []getproviders.Hash, allowSkippingInstallWithoutHashes bool) (*getproviders.PackageAuthenticationResult, func() error, error) {
+	unlock, err := d.lock(ctx, meta.Provider, meta.Version)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	install, installErr := d.installPackageWithLock(ctx, meta, allowedHashes, allowSkippingInstallWithoutHashes)
+	if installErr != nil {
+		return install, nil, errors.Join(installErr, unlock())
+	}
+
+	return install, unlock, nil
+}
 func (d *Dir) installPackageWithLock(ctx context.Context, meta getproviders.PackageMeta, allowedHashes []getproviders.Hash, allowSkippingInstallWithoutHashes bool) (*getproviders.PackageAuthenticationResult, error) {
 	if meta.TargetPlatform != d.targetPlatform {
 		return nil, fmt.Errorf("can't install %s package into cache directory expecting %s", meta.TargetPlatform, d.targetPlatform)
