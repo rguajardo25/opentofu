@@ -569,10 +569,18 @@ func (i *Installer) ensureProviderVersionInstalled(
 			cb(provider, version, installTo.BasePath())
 		}
 
-		// We don't do a hash check here because we already did that
-		// as part of the ensureProviderVersionInDirectory call above.
+		// We validate the hash here to prevent TOCTOU attacks where the
+		// provider could be replaced in the global cache after installation
+		// but before linking. We use the newHashes that were just computed
+		// during installation to ensure the package hasn't been tampered with.
+		// If newHashes is empty (which shouldn't happen in normal operation),
+		// we fall back to preferredHashes from the lock file.
+		hashesToValidate := newHashes
+		if len(hashesToValidate) == 0 {
+			hashesToValidate = preferredHashes
+		}
 		new := installTo.ProviderVersion(provider, version)
-		err := linkTo.LinkFromOtherCache(ctx, new, nil)
+		err := linkTo.LinkFromOtherCache(ctx, new, hashesToValidate)
 		if err != nil {
 			if cb := evts.LinkFromCacheFailure; cb != nil {
 				cb(provider, version, err)
@@ -669,14 +677,40 @@ func (i *Installer) ensureProviderVersionInDirectory(
 	}
 
 	allowSkippingInstallWithoutHashes := i.globalCacheDirMayBreakDependencyLockFile && isGlobalCache
-	authResult, err := installTo.InstallPackage(ctx, meta, allowedHashes, allowSkippingInstallWithoutHashes)
-	if err != nil {
-		// TODO: Consider retrying for certain kinds of error that seem
-		// likely to be transient. For now, we just treat all errors equally.
-		if cb := evts.FetchPackageFailure; cb != nil {
-			cb(provider, version, err)
+	
+	// For global cache installations, we need to hold the lock until after
+	// we've computed the hash to prevent TOCTOU attacks where a malicious
+	// actor could replace the provider between installation and hash computation.
+	var authResult *getproviders.PackageAuthenticationResult
+	var unlock func() error
+	var err error
+	
+	if isGlobalCache {
+		authResult, unlock, err = installTo.InstallPackageRetainingLock(ctx, meta, allowedHashes, allowSkippingInstallWithoutHashes)
+		if err != nil {
+			// TODO: Consider retrying for certain kinds of error that seem
+			// likely to be transient. For now, we just treat all errors equally.
+			if cb := evts.FetchPackageFailure; cb != nil {
+				cb(provider, version, err)
+			}
+			return nil, nil, err
 		}
-		return nil, nil, err
+		// Ensure we release the lock when we're done, even if we return early
+		defer func() {
+			if unlock != nil {
+				unlock()
+			}
+		}()
+	} else {
+		authResult, err = installTo.InstallPackage(ctx, meta, allowedHashes, allowSkippingInstallWithoutHashes)
+		if err != nil {
+			// TODO: Consider retrying for certain kinds of error that seem
+			// likely to be transient. For now, we just treat all errors equally.
+			if cb := evts.FetchPackageFailure; cb != nil {
+				cb(provider, version, err)
+			}
+			return nil, nil, err
+		}
 	}
 
 	new := installTo.ProviderVersion(provider, version)
@@ -726,6 +760,15 @@ func (i *Installer) ensureProviderVersionInDirectory(
 			cb(provider, version, err)
 		}
 		return authResult, nil, err
+	}
+	
+	// Release the lock now that we've computed the hash while holding it.
+	// This must be done before we return to ensure the lock is released.
+	if unlock != nil {
+		if unlockErr := unlock(); unlockErr != nil {
+			return authResult, nil, unlockErr
+		}
+		unlock = nil // Prevent double-unlock in defer
 	}
 
 	// localHashes is the set of hashes that we were able to verify locally
