@@ -64,6 +64,26 @@ jobs:
           echo "IS_TAG_ON_MAIN=${IS_TAG_ON_MAIN}" >> $GITHUB_OUTPUT
           echo "IS_TAG_ON_VERSION=${IS_TAG_ON_VERSION}" >> $GITHUB_OUTPUT
 
+      - name: Validate release ref authorization
+        if: startsWith(inputs.tag, 'v')
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          IS_TAG_ON_MAIN: ${{ steps.validate_tag.outputs.IS_TAG_ON_MAIN }}
+          IS_TAG_ON_VERSION: ${{ steps.validate_tag.outputs.IS_TAG_ON_VERSION }}
+        run: |
+          # Verify that the ref is an actual git tag, not a branch
+          if ! git rev-parse "refs/tags/$INPUT_TAG" >/dev/null 2>&1; then
+            echo "ERROR: Release mode requires an actual git tag. '$INPUT_TAG' is not a valid tag."
+            exit 1
+          fi
+          
+          # Verify that the tag is on main or a version branch
+          if [[ "$IS_TAG_ON_MAIN" != "true" && "$IS_TAG_ON_VERSION" != "true" ]]; then
+            echo "ERROR: Release tag must be on main branch or a version branch (v*.*)."
+            echo "Tag '$INPUT_TAG' is not on an authorized release branch."
+            exit 1
+          fi
+
       - name: Check if release is allowed or not
         id: validate_release
         env:
