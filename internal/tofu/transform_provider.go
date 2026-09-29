@@ -989,8 +989,12 @@ func (t *ProviderConfigTransformer) addProxyProviders(g *Graph, c *configs.Confi
 			Alias:    pair.InChild.Addr().Alias,
 		}
 
+		// Look up the parent's provider FQN using the parent's local name.
+		// When there's a mapping like "bar = foo", we need to find the parent's
+		// "foo" provider, not a potentially different "bar" provider.
+		parentFqn := parent.Module.ProviderForLocalConfig(pair.InParent.Addr())
 		fullParentAddr := addrs.AbsProviderConfig{
-			Provider: fqn,
+			Provider: parentFqn,
 			Module:   parentPath,
 			Alias:    pair.InParent.Addr().Alias,
 		}
